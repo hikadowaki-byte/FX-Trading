@@ -1,0 +1,51 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © hi_kadowaki
+
+//@version=5
+indicator("SMA Cross and Flat Indicator", overlay=true)
+
+// ユーザー入力で閾値を設定（ガイドラインをtooltipに記載）
+threshold = input.float(0.0005, "Threshold for Flat Detection", minval=0.00001, step=0.00001, tooltip="SMAの水平推移を検出するための閾値。値が小さいほど水平と判定されやすくなります。\n例: 5分足では0.00002～0.00005、1時間足では0.0005～0.001、日足では0.005～0.01")
+
+// 移動平均線の計算
+sma20 = ta.sma(close, 20)
+sma75 = ta.sma(close, 75)
+sma200 = ta.sma(close, 200)
+
+// 移動平均線のプロット（赤、青、黄、一番細い線）
+plot(sma20, color=color.red, linewidth=1, title="20 SMA")
+plot(sma75, color=color.blue, linewidth=1, title="75 SMA")
+plot(sma200, color=color.yellow, linewidth=1, title="200 SMA")
+
+// 20SMAと75SMAのクロス検出
+cross = ta.crossover(sma20, sma75) or ta.crossunder(sma20, sma75)
+
+// クロス時にチャート全体を貫く縦線を描画
+if cross
+    line.new(bar_index, close * 0.5, bar_index, close * 1.5, color=color.white, style=line.style_dashed, width=1)
+
+// 水平推移の検出（SMAの変化率を計算）
+sma20_diff = math.abs(sma20 - sma20[1])
+sma75_diff = math.abs(sma75 - sma75[1])
+
+// 水平推移の判定（ユーザー指定の閾値を使用）
+is_sma20_flat = sma20_diff < threshold
+is_sma75_flat = sma75_diff < threshold
+
+// 背景色の設定（透明度50%）
+var color bg_color = na
+if is_sma20_flat and is_sma75_flat
+    bg_color := color.rgb(0, 128, 128, 50)  // 緑と紫の混合色、透明度50%
+else if is_sma20_flat
+    bg_color := color.new(color.green, 50)  // 緑、透明度50%
+else if is_sma75_flat
+    bg_color := color.new(color.purple, 50)  // 紫、透明度50%
+else
+    bg_color := na
+
+// 背景色のプロット
+bgcolor(bg_color)
+
+// 水平から傾きが生じた場合
+sma20_tilt = not is_sma20_flat and is_sma20_flat[1]
+sma75_tilt = not is_sma75_flat and is_sma75_flat[1]
