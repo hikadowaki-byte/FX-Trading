@@ -1,0 +1,32 @@
+//@version=5
+indicator("MTF_Channel_Psycho v2.0", overlay=true)
+
+// === 1. 平行チャネル ===
+high1 = ta.highest(high, 20)
+low1 = ta.lowest(low, 20)
+channel_top = line.new(x1=bar_index-20, y1=high1, x2=bar_index, y2=high[10])
+channel_bottom = line.new(x1=bar_index-20, y1=low1, x2=bar_index, y2=low[10])
+
+// === 2. フィボ38.2-61.8 ===
+fib_382 = channel_bottom + (channel_top - channel_bottom) * 0.382
+fib_618 = channel_bottom + (channel_top - channel_bottom) * 0.618
+plot(fib_382, color=color.orange)
+plot(fib_618, color=color.red)
+
+// === 3. クロス反転 ===
+gc_to_dc = ta.crossover(ta.sma(close,5), ta.sma(close,20)) and ta.sma(close,20)[1] > ta.sma(close,20)[2]
+dc_to_gc = ta.crossunder(ta.sma(close,5), ta.sma(close,20)) and ta.sma(close,20)[1] < ta.sma(close,20)[2]
+
+// === 4. スコア計算 ===
+score = 0
+score += math.abs(close - request.security(syminfo.tickerid,"60",ta.sma(close,5))) / close <= 0.001 ? 30 : 0
+score += math.abs(ta.sma(close,20)[1] - ta.sma(close,20)) / ta.sma(close,20) <= 0.001 ? 20 : 0
+score += close > fib_382 and close < fib_618 ? 15 : 0
+score += ta.sma(close,5) > fib_618 and volume > ta.sma(volume,20) ? 10 : 0
+score += gc_to_dc or dc_to_gc ? 25 : 0
+
+bgcolor(score >= 90 ? color.new(color.green,90) : na)
+plot(score, "Score", color=score >= 90 ? color.lime : color.gray)
+
+// === アラート ===
+alertcondition(score >= 90, "神エントリー", "90点以上！")
