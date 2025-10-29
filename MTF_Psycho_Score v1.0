@@ -1,0 +1,19 @@
+// === 方向自動判定 ===
+trend_dir = close > sma5_1h ? 1 : -1  // 1=ロング, -1=ショート
+
+// === 技巧スコア（方向対応）===
+touch_1h = math.abs(close - sma5_1h) / sma5_1h <= 0.001 ? 30 : 0
+level_15m = slope_15m <= 0.001 ? 20 : 0
+
+convergence = trend_dir == 1 ? 
+     (close > sma20_15m and ta.sma(close, 5) > sma20_15m ? 15 : 0) :
+     (close < sma20_15m and ta.sma(close, 5) < sma20_15m ? 15 : 0)
+
+break_1m = trend_dir == 1 ?
+     (ta.sma(close, 5) > counter_line and volume > ta.sma(volume, 20) ? 5 : 0) :
+     (ta.sma(close, 5) < counter_line and volume > ta.sma(volume, 20) ? 5 : 0)
+
+// === 心理スコア（逆ポジの痛み）===
+psych_pain = trend_dir == 1 ?
+     (bounce_1h * -1 + stagnation_15m + tight_range) :  // ショートの痛み
+     (bounce_1h + stagnation_15m + tight_range)        // ロングの痛み
