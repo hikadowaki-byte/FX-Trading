@@ -1,0 +1,73 @@
+#property strict
+#property indicator_chart_window
+
+// === 入力パラメータ ===
+input int FontSize = 14;
+input color TextColor = clrLime;
+
+// === グローバル変数 ===
+int total_score = 0;
+string obj_name = "ScoreMemo";
+
+// === 初期化 ===
+int OnInit() {
+   CreateScoreObject();
+   return(INIT_SUCCEEDED);
+}
+
+// === オブジェクト作成 ===
+void CreateScoreObject() {
+   ObjectCreate(0, obj_name, OBJ_LABEL, 0, 0, 0);
+   ObjectSetInteger(0, obj_name, OBJPROP_CORNER, CORNER_RIGHT_UPPER);
+   ObjectSetInteger(0, obj_name, OBJPROP_XDISTANCE, 10);
+   ObjectSetInteger(0, obj_name, OBJPROP_YDISTANCE, 20);
+   ObjectSetInteger(0, obj_name, OBJPROP_FONTSIZE, FontSize);
+   ObjectSetString(0, obj_name, OBJPROP_FONT, "Arial Bold");
+   ObjectSetInteger(0, obj_name, OBJPROP_COLOR, TextColor);
+   UpdateScoreDisplay();
+}
+
+// === クリック処理 ===
+int OnChartEvent(const int id, const long &lparam, const double &dparam, const string &sparam) {
+   if(id == CHARTEVENT_OBJECT_CLICK && sparam == obj_name) {
+      ShowInputMenu();
+   }
+   return(0);
+}
+
+// === プルダウンメニュー ===
+void ShowInputMenu() {
+   string items[] = {
+      "1h5SMAタッチ [30]",
+      "15m20SMA水平 [20]",
+      "チャネル+フィボ [15]",
+      "MTF 5SMA抜け [10]",
+      "実体小+大出来高 [5]",
+      "心理:ロング投げ [15]",
+      "心理:逆ポジ焦り [10]"
+   };
+   int points[] = {30,20,15,10,5,15,10};
+   
+   string menu = "";
+   for(int i=0; i<7; i++) {
+      menu += items[i] + "\n";
+   }
+   
+   int result = MessageBox(menu, "スコア入力", MB_OKCANCEL);
+   if(result == IDOK) {
+      // 簡易入力（実際はダイアログで選択）
+      int input = StrToInteger(InputBox("点数を入力（0 or 最大点）", "入力", "0"));
+      total_score = input;
+      UpdateScoreDisplay();
+   }
+}
+
+// === 表示更新 ===
+void UpdateScoreDisplay() {
+   ObjectSetString(0, obj_name, OBJPROP_TEXT, "総スコア: " + IntegerToString(total_score) + " /100");
+}
+
+// === 終了処理 ===
+void OnDeinit(const int reason) {
+   ObjectDelete(0, obj_name);
+}
