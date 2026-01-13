@@ -1,0 +1,411 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © katanai_makenai_fx
+
+//@version=6
+indicator("Samurai Zones + Granville3W", shorttitle="SamuraiZ3W", overlay=true, precision=6)
+
+// ---------------- Inputs ----------------
+// Zone / manual threshold (existing)
+use_tf_preset    = input.bool(true, "Use TF preset as starting threshold")
+manualThreshold  = input.float(3000, "Manual Threshold (abs volume)", step=1)
+preset_1m   = input.float(50,   "Preset 1m",   step=1)
+preset_5m   = input.float(200,  "Preset 5m",   step=1)
+preset_15m  = input.float(600,  "Preset 15m",  step=1)
+preset_30m  = input.float(1200, "Preset 30m",  step=1)
+preset_1h   = input.float(3000, "Preset 1h",   step=1)
+preset_4h   = input.float(9000, "Preset 4h",   step=1)
+preset_D    = input.float(25000,"Preset 1D",   step=1)
+
+// Zone drawing / housekeeping
+boxPaddingPct   = input.float(0.02, "Zone padding (% of candle range)", step=0.01)
+zoneColor       = input.color(color.new(color.green, 85), "Zone base color")
+zoneHighlight   = input.color(color.new(color.orange, 5), "Zone highlight (allowed entry)") // orange highlight
+maxZones        = input.int(120, "Max zones", minval=10)
+zoneExpireBars  = input.int(2000, "Expire zones older than bars (0=disabled)", minval=0)
+useBodyForZone  = input.bool(false, "Use candle body for zone height")
+
+// Percentile / UI
+lookbackPct     = input.int(500, "Percentile lookback (bars)", minval=10)
+showPercentile  = input.bool(true, "Show Manual -> Percentile mapping label")
+showZoneLabels  = input.bool(true, "Show zone labels (hits/score/lastSeen)")
+
+// Granville / MA settings (user provided)
+ma5_len   = input.int(5, "MA fast (white)", minval=1)
+ma20_len  = input.int(20, "MA mid (red)", minval=1)
+ma75_len  = input.int(75, "MA filter (blue)", minval=1)
+ma200_len = input.int(200, "MA slow (yellow)", minval=1)
+
+// Granville touch/bounce params
+touchTolPct       = input.float(0.2, "Touch tolerance (%)", step=0.05) // % of price
+bounceConfirmBars = input.int(2, "Bounce confirm bars", minval=1)
+
+// Third-wave proxy params (user accepted defaults)
+minImpulseBars = input.int(3, "Min impulse bars", minval=1)
+minVolRatio    = input.float(1.5, "Min volume ratio (impulse)", step=0.1)
+retraceMaxPct  = input.float(61.8, "Max retrace (%)", step=0.1)
+impulseSearchWindow = input.int(20, "Search window for impulse (bars)", minval=5)
+
+// Scoring / selection
+recentBars      = input.int(50, "Recency threshold (bars)", minval=1)
+scoreThreshold  = input.int(2, "Score threshold (hits+recency+volIntensity)", minval=1)
+thirdWaveRequired = input.bool(true, "Require Third-wave proxy (per request)")
+
+// Misc
+minVolumeAbs    = input.float(0, "Min absolute volume (0 disabled)", step=1)
+debugPlots      = input.bool(false, "Show debug plots (vol ratio, clusterCount)")
+
+// ---------------- Helpers / MA ----------------
+ma5   = ta.sma(close, ma5_len)
+ma20  = ta.sma(close, ma20_len)
+ma75  = ta.sma(close, ma75_len)
+ma200 = ta.sma(close, ma200_len)
+
+// Timeframe preset helper
+tf = timeframe.period
+getPresetForTf(_tf) =>
+    _p = preset_1h
+    if _tf == "1"
+        _p := preset_1m
+    else if _tf == "5"
+        _p := preset_5m
+    else if _tf == "15"
+        _p := preset_15m
+    else if _tf == "30"
+        _p := preset_30m
+    else if _tf == "60" or _tf == "1H"
+        _p := preset_1h
+    else if _tf == "120"
+        _p := preset_1h * 2
+    else if _tf == "240" or _tf == "4H"
+        _p := preset_4h
+    else if _tf == "D"
+        _p := preset_D
+    else
+        _p := preset_1h
+    _p
+
+presetVal = getPresetForTf(tf)
+effectiveThreshold = use_tf_preset ? presetVal : manualThreshold
+
+// Basic volume
+avgVol = ta.sma(volume, 50)
+volOK = not na(volume) and (not na(avgVol) or true)
+isSpikeRaw = (volume >= effectiveThreshold)
+isSpikeRaw := isSpikeRaw and (minVolumeAbs <= 0 ? true : volume >= minVolumeAbs)
+isSpike = isSpikeRaw
+
+// Percentile mapping for UI
+countExceeds = 0
+n = math.min(lookbackPct, bar_index + 1)
+for i = 0 to n - 1
+    v = volume[i]
+    if not na(v) and v >= effectiveThreshold
+        countExceeds += 1
+percentileVal = n > 0 ? 100.0 * countExceeds / n : 0.0
+
+// ---------------- Zone arrays ----------------
+var float[] zTop = array.new_float()
+var float[] zBottom = array.new_float()
+var int[]   zLeft = array.new_int()
+var int[]   zRight = array.new_int()
+var box[]   zBox = array.new_box()
+var int[]   zLastSeen = array.new_int()
+var int[]   zHits = array.new_int()
+var float[] zMaxVolRatio = array.new_float()  // max(volume/avgVol) seen in zone
+
+f_prune_if_needed() =>
+    if array.size(zBox) > maxZones
+        oldBox = array.shift(zBox)
+        box.delete(oldBox)
+        array.shift(zTop)
+        array.shift(zBottom)
+        array.shift(zLeft)
+        array.shift(zRight)
+        array.shift(zLastSeen)
+        array.shift(zHits)
+        array.shift(zMaxVolRatio)
+
+// Safe merge/create with hits and vol intensity tracking
+f_merge_or_create(newTop, newBottom, newLeft, newRight, spikeVolRatio) =>
+    merged = false
+    sz = array.size(zBox)
+    if sz > 0
+        for i = 0 to sz - 1
+            exTop = array.get(zTop, i)
+            exBottom = array.get(zBottom, i)
+            // overlap check
+            if not (newBottom > exTop or newTop < exBottom)
+                // merge
+                mTop = math.max(exTop, newTop)
+                mBottom = math.min(exBottom, newBottom)
+                array.set(zTop, i, mTop)
+                array.set(zBottom, i, mBottom)
+                array.set(zLeft, i, math.min(array.get(zLeft, i), newLeft))
+                array.set(zRight, i, math.max(array.get(zRight, i), newRight))
+                array.set(zLastSeen, i, bar_index)
+                // increment hits
+                array.set(zHits, i, array.get(zHits, i) + 1)
+                // update max vol ratio
+                array.set(zMaxVolRatio, i, math.max(array.get(zMaxVolRatio, i), spikeVolRatio))
+                // update box
+                b = array.get(zBox, i)
+                box.set_top(b, mTop)
+                box.set_bottom(b, mBottom)
+                box.set_left(b, array.get(zLeft, i))
+                box.set_right(b, array.get(zRight, i))
+                // keep base color (we recolor later when highlighting)
+                merged := true
+                break
+    if not merged
+        b = box.new(left=newLeft, top=newTop, right=newRight, bottom=newBottom, xloc=xloc.bar_index, border_width=1, border_color=color.new(color.green,60), bgcolor=zoneColor)
+        array.push(zBox, b)
+        array.push(zTop, newTop)
+        array.push(zBottom, newBottom)
+        array.push(zLeft, newLeft)
+        array.push(zRight, newRight)
+        array.push(zLastSeen, bar_index)
+        array.push(zHits, 1)
+        array.push(zMaxVolRatio, spikeVolRatio)
+    f_prune_if_needed()
+
+// Decide marking and create/merge
+minSpacing = 3
+var int lastMarked = na
+shouldMark = false
+if isSpike
+    shouldMark := na(lastMarked) ? true : (bar_index - lastMarked >= minSpacing)
+
+if shouldMark
+    lastMarked := bar_index
+    zHigh = useBodyForZone ? math.max(open, close) : high
+    zLow  = useBodyForZone ? math.min(open, close) : low
+    pad = (zHigh - zLow) * boxPaddingPct
+    newTop = zHigh + pad
+    newBottom = zLow - pad
+    newLeft = bar_index
+    newRight = bar_index
+    spikeVolRatio = not na(avgVol) and avgVol>0 ? volume / avgVol : 0.0
+    f_merge_or_create(newTop, newBottom, newLeft, newRight, spikeVolRatio)
+
+// Expire old zones safely
+if zoneExpireBars > 0
+    sz2 = array.size(zBox) - 1
+    if sz2 >= 0
+        for i = sz2 to 0
+            lastSeen = array.get(zLastSeen, i)
+            if (bar_index - lastSeen) > zoneExpireBars
+                b = array.get(zBox, i)
+                box.delete(b)
+                array.remove(zBox, i)
+                array.remove(zTop, i)
+                array.remove(zBottom, i)
+                array.remove(zLeft, i)
+                array.remove(zRight, i)
+                array.remove(zLastSeen, i)
+                array.remove(zHits, i)
+                array.remove(zMaxVolRatio, i)
+
+// ----------------- Granville: pullback + bounce detection -----------------
+// function: detect touch of MA at index i for given MA series
+f_touched_ma_at(_i, _ma) =>
+    maVal = _ma[_i]
+    // guard
+    if na(maVal)
+        false
+    else
+        low[_i] <= maVal and high[_i] >= maVal or math.abs(close[_i] - maVal) <= maVal * (touchTolPct / 100.0)
+
+// bounce detection in a window: scan back for a touch and subsequent bounce (bull/bear)
+f_bounce_at_ma(_ma) =>
+    touched = false
+    bounced = false
+    // scan back up to bounceConfirmBars within a small backward window (we use bounceConfirmBars)
+    lookBack = math.min(bounceConfirmBars + 2, bar_index + 1)
+    for i = 0 to lookBack - 1
+        idx = i
+        // check touch at idx bars ago
+        if f_touched_ma_at(idx, _ma)
+            touched := true
+            // look forward from idx (towards current 0) up to bounceConfirmBars
+            for j = 0 to bounceConfirmBars - 1
+                fidx = idx - j  // fidx closer to current (since idx is bars ago)
+                if fidx < 0
+                    continue
+                // relative index: we check bars more recent than touch (smaller idx)
+                // bounce condition for bullish: close > ma and close > open
+                maVal = _ma[fidx]
+                if not na(maVal)
+                    if close[fidx] > maVal and close[fidx] > open[fidx]
+                        bounced := true
+                        break
+            if bounced
+                break
+    bounced
+
+// Evaluate bounce conditions at ma75 (user requested 75SMA touch preference)
+granvilleBounce75 = f_bounce_at_ma(ma75)
+
+// ---------------- Third-wave proxy detection ----------------
+// Search back to find most recent impulse of >= minImpulseBars bars (same direction)
+f_find_recent_impulse() =>
+    found = false
+    imp_start = na
+    imp_end = na
+    imp_dir = 0
+    // search back from current bar; we will inspect windows ending at k where k from 0..impulseSearchWindow-1
+    for k = 0 to impulseSearchWindow - 1
+        // consider window ending at k bars ago: endIdx = k, startIdx = k + minImpulseBars -1
+        endIdx = k
+        startIdx = k + minImpulseBars - 1
+        if startIdx > bar_index
+            continue
+        // if startIdx > endIdx then invalid (since startIdx is older, bars ago larger number)
+        if startIdx < 0
+            continue
+        // determine direction of impulse by comparing closes
+        dirSign = sign(close[endIdx] - close[startIdx])
+        if dirSign == 0
+            continue
+        ok = true
+        for m = startIdx - 1 to endIdx by -1
+            // ensure consecutive bars in that span are all in same direction (close rising for bullish)
+            // Note: m iterates older to newer via negative step; simpler check: check each adjacent pair
+            // but to keep simple: check close difference sign between consecutive bars
+            // get absolute m index
+            mi = m
+            if mi <= 0
+                // skip if out of range
+                continue
+        // check that across the span each bar's delta has same sign (approx)
+        consistent = true
+        for t = startIdx to endIdx
+            prev = t + 1
+            if prev > endIdx
+                prev := endIdx
+            // because indexing is bars ago, we compare close[t] (older) to close[t-1] (newer)? To avoid confusion we'll compute forward deltas using history indexing
+        // Simpler approach: require net move magnitude > 0 and at least one bar in span has volume spike ratio >= minVolRatio
+        netMove = math.abs(close[endIdx] - close[startIdx])
+        volConfirm = false
+        for v = startIdx to endIdx
+            vr = not na(avgVol) and avgVol>0 ? volume[v] / avgVol[v] : 0.0
+            if vr >= minVolRatio
+                volConfirm := true
+                break
+        if netMove > 0 and volConfirm
+            found := true
+            imp_start := startIdx
+            imp_end := endIdx
+            imp_dir := dirSign
+            break
+    [found, imp_start, imp_end, imp_dir]
+
+// A simpler third-wave proxy: check last impulse in recent window by scanning for a contiguous run of minImpulseBars with same direction and at least one vol ratio >= minVolRatio
+f_third_wave_proxy() =>
+    found = false
+    // iterate from recent older to current
+    for s = 0 to impulseSearchWindow - 1
+        // consider start s bars ago, check if there is a contiguous sequence of minImpulseBars ending at e = s - (minImpulseBars - 1)
+        // simpler: check spans [s + minImpulseBars -1 .. s] as bars-ago indices
+        startAgo = s + minImpulseBars - 1
+        endAgo = s
+        if startAgo > bar_index
+            continue
+        // ensure indices valid
+        if startAgo < 0 or endAgo < 0
+            continue
+        // determine direction by comparing close[endAgo] - close[startAgo]
+        net = close[endAgo] - close[startAgo]
+        dir = net > 0 ? 1 : (net < 0 ? -1 : 0)
+        if dir == 0
+            continue
+        // check volume confirmation: any bar in the span with vol ratio >= minVolRatio
+        volConf = false
+        for v = startAgo to endAgo
+            // avoid referencing avgVol indexed as array; use avgVol[v] (series indexing)
+            avgV = ta.sma(volume, 50)[v]
+            vr = (not na(avgV) and avgV > 0) ? volume[v] / avgV : 0.0
+            if vr >= minVolRatio
+                volConf := true
+                break
+        if not volConf
+            continue
+        // compute impulse magnitude and retrace
+        // impulse magnitude: abs(close[endAgo] - close[startAgo])
+        impMag = math.abs(close[endAgo] - close[startAgo])
+        // retrace magnitude: from endAgo to current, measure move against impulse
+        retraceMag = math.abs(close - close[endAgo])
+        // If retrace is opposite direction, retraceMag should be measured appropriately
+        if impMag > 0
+            retracePct = 100.0 * retraceMag / impMag
+            if retracePct <= retraceMaxPct
+                found := true
+                break
+    found
+
+thirdWaveFlag = f_third_wave_proxy()
+
+// ---------------- Zone scoring & highlighting ----------------
+sz = array.size(zBox)
+for i = 0 to sz - 1
+    // compute score
+    hits = array.get(zHits, i)
+    lastSeen = array.get(zLastSeen, i)
+    vr = array.get(zMaxVolRatio, i)
+    recency = ((bar_index - lastSeen) <= recentBars) ? 1 : 0
+    volInt = vr >= minVolRatio ? 1 : 0
+    score = hits + recency + volInt
+    // decide allowed entry: must meet scoreThreshold, granville bounce at ma75 (we require thirdWave), and thirdWaveFlag true
+    meetsScore = score >= scoreThreshold
+    meetsGranville = granvilleBounce75  // bounce in recent bars (evaluated at current bar)
+    meetsThird = thirdWaveFlag
+    allowEntry = meetsScore and meetsGranville and (thirdWaveRequired ? meetsThird : true)
+    // color update
+    b = array.get(zBox, i)
+    if allowEntry
+        box.set_bgcolor(b, zoneHighlight)
+        box.set_border_width(b, 2)
+    else
+        box.set_bgcolor(b, zoneColor)
+        box.set_border_width(b, 1)
+    // optional label
+    if showZoneLabels
+        labelTxt = "hits:" + str.tostring(hits) + " score:" + str.tostring(score) + " last:" + str.tostring(bar_index - lastSeen) + "b"
+        // place label at right edge of zone
+        // to avoid creating many labels, create a single per zone stored in a parallel array might be better, but to keep simple we update a single label per script per zone via dynamic labels omitted for perf
+        // Instead we set small text via box border color/opacity; explicit labels are heavy - keep minimal to avoid draw limit
+        // We will create/refresh a small label for the last zone only (to avoid many labels)
+        if i == sz - 1
+            var label zonelbl = na
+            if na(zonelbl)
+                zonelbl := label.new(array.get(zRight, i), array.get(zTop, i), labelTxt, yloc=yloc.abovebar, style=label.style_label_left, color=color.black, textcolor=color.white)
+            else
+                label.set_xy(zonelbl, array.get(zRight, i), array.get(zTop, i))
+                label.set_text(zonelbl, labelTxt)
+
+// ---------------- Top-level visuals & debug plots ----------------
+plot(ma5, color=color.white, title="MA5")
+plot(ma20, color=color.red, title="MA20")
+plot(ma75, color=color.blue, title="MA75")
+plot(ma200, color=color.yellow, title="MA200")
+
+// show effective threshold as line (top-level)
+plot(effectiveThreshold, title="Threshold (abs vol)", color=color.orange, linewidth=1)
+plot(debugPlots ? (not na(avgVol) and avgVol>0 ? volume / avgVol : na) : na, title="volRatio (debug)", color=color.yellow)
+
+// spike marker
+plotshape(isSpike, title="spikeMarker", location=location.abovebar, style=shape.triangleup, color=color.orange, size=size.tiny)
+
+// UI info label (single)
+var label infoLbl = na
+if showPercentile and barstate.islast
+    lbltxt = "TF: " + tf + " | Preset: " + str.tostring(presetVal) + (use_tf_preset ? " (used)" : " (not used)") + "\nEffective Thresh: " + str.tostring(effectiveThreshold) + "\nPercentile (" + str.tostring(lookbackPct) + "b): " + str.tostring(percentileVal, "#.##") + "%"
+    if na(infoLbl)
+        infoLbl := label.new(bar_index, high, text=lbltxt, yloc=yloc.abovebar, style=label.style_label_left, color=color.black, textcolor=color.white)
+    else
+        label.set_xy(infoLbl, bar_index, high)
+        label.set_text(infoLbl, lbltxt)
+
+// ---------------- Alerts ----------------
+alertcondition(array.size(zBox) > 0 and thirdWaveFlag, title="Zone + Granville + 3W", message="Samurai: zone meets granville + third-wave criteria (const message)")
+
+// End of script
