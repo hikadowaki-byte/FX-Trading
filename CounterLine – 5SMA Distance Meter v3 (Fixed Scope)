@@ -1,0 +1,95 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © katanai_makenai_fx
+
+//@version=5
+indicator("CounterLine – 5SMA Distance Meter v3 (Fixed Scope)", overlay=true, max_labels_count=500)
+
+// === 設定 ===
+smaLength = input.int(defval=5, title="SMA Length")
+show_distance = input.bool(defval=true, title="距離表示をONにする")
+bar_offsetA = input.int(defval=20, title="左側基準（過去バー）", minval=1)
+bar_offsetB = input.int(defval=5, title="右側基準（過去バー）", minval=1)
+use_highs = input.bool(defval=true, title="高値基準 (falseで安値基準)")
+pipsWarnThreshold = input.int(defval=5, title="警告閾値 (pips)")
+showScriptPoint = input.bool(defval=true, title="ライン位置に点を表示")
+reset_line = input.bool(false, title="Reset Line (チェックでライン再生成)")  // 修正: リセット機能追加
+
+// === 5SMA 計算・描画 ===
+smaValue = ta.sma(close, smaLength)
+plot(smaValue, color=color.new(color.aqua, 0), title="5SMA", linewidth=2)
+
+// === 変数（保持） ===
+var line counterLine = na
+var int pointA_bar = na
+var int pointB_bar = na
+var float pointA_price = na
+var float pointB_price = na
+
+// === テーブル（1回だけ作る） ===
+var table distTable = table.new(position.top_right, 1, 2, border_width=1)
+
+// === リセット機能（チェックでライン削除・再生成） ===
+if reset_line
+    line.delete(counterLine)
+    counterLine := na
+    pointA_bar := na
+    pointB_bar := na
+    pointA_price := na
+    pointB_price := na
+
+// === ライン生成（生成済みなら再生成しない） ===
+if barstate.islast and na(counterLine)
+    pointA_bar := bar_index - bar_offsetA
+    pointB_bar := bar_index - bar_offsetB
+    pointA_price := use_highs ? high[bar_offsetA] : low[bar_offsetA]
+    pointB_price := use_highs ? high[bar_offsetB] : low[bar_offsetB]
+    // 修正: xlocをbar_timeに変更 → ドラッグで時間軸位置を動かせるようになる
+    counterLine := line.new(pointA_bar, pointA_price, pointB_bar, pointB_price, xloc=xloc.bar_time, extend=extend.right, color=color.yellow, width=2)
+    label.new(bar_index, high, "Line created (Drag to adjust)", style=label.style_label_down, color=color.new(color.yellow, 60), textcolor=color.black)
+
+// === ラインが存在する場合に距離を計算 ===
+float distance = na
+float distance_pips = na
+float projected_y = na
+
+if not na(counterLine)
+    float x1 = line.get_x1(counterLine)
+    float x2 = line.get_x2(counterLine)
+    float y1 = line.get_y1(counterLine)
+    float y2 = line.get_y2(counterLine)
+    
+    if x2 != x1
+        float slope = (y2 - y1) / (x2 - x1)
+        projected_y := y1 + slope * (bar_index - x1)
+    else
+        projected_y := y1
+    
+    distance := smaValue - projected_y
+    
+    // pipFactor（通貨ペア自動対応）
+    float pipFactor = switch syminfo.ticker
+        "XAUUSD" => 100.0
+        "XAUUSDTP" => 100.0
+        "GOLD" => 100.0
+        "USDJPY" => 100.0
+        "EURJPY" => 100.0
+        "GBPJPY" => 100.0
+        "EURUSD" => 10000.0
+        "GBPUSD" => 10000.0
+        "AUDUSD" => 10000.0
+        => syminfo.mintick == 0.01 ? 100.0 : 10000.0
+    
+    distance_pips := math.abs(distance * pipFactor)
+
+// === テーブル表示（毎バー安全に更新） ===
+if show_distance
+    table.cell(distTable, 0, 0, "5SMA ⇔ Line", text_color=color.black, bgcolor=color.new(color.yellow, 70))
+    
+    string distText = not na(distance) ? "Price diff: " + str.tostring(distance, format.mintick) : "Line not available"
+    string pipsText = not na(distance_pips) ? "  " + str.tostring(distance_pips, "#.0") + " pips" : ""
+    color txtColor = (not na(distance_pips) and distance_pips <= pipsWarnThreshold) ? color.orange : color.white
+    table.cell(distTable, 0, 1, distText + pipsText, text_color=txtColor)
+
+// === 補助プロット（ライン上の点） ===
+plotSeries = (not na(counterLine) and showScriptPoint) ? projected_y : na
+plot(plotSeries, title="LinePriceAtCurrentDot", style=plot.style_circles, linewidth=2, color=color.yellow)
