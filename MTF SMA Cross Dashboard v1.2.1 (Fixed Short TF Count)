@@ -1,0 +1,102 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © katanai_makenai_fx
+
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © katanai_makenai_fx
+
+// 修正履歴:
+// - 2026/02: lookahead=barmerge.lookahead_on を追加（短TF barssinceのアグリゲートバグ修正）
+// - lookahead=barmerge.lookahead_off を全削除（v5デフォルトでOK）
+// - 時間帯判定をバー時刻基準に統一（過去検証対応強化）
+
+//@version=5
+indicator("MTF SMA Cross Dashboard v1.2.1 (Fixed Short TF Count)", overlay=true)
+
+//--------------------------------------------------
+// Inputs
+//--------------------------------------------------
+shortLen = input.int(5, "Short SMA Length", minval=1)
+longLen  = input.int(20, "Long SMA Length", minval=1)
+showSMA  = input.bool(true, "Show SMA on chart")
+
+dashPosInput = input.string("top_right", "Dashboard Position", options=["top_right", "top_left", "bottom_right", "bottom_left"])
+
+//--------------------------------------------------
+// Dashboard Position
+//--------------------------------------------------
+dashPos = dashPosInput == "top_left" ? position.top_left :
+          dashPosInput == "bottom_left" ? position.bottom_left :
+          dashPosInput == "bottom_right" ? position.bottom_right :
+          position.top_right
+
+//--------------------------------------------------
+// SMA on current chart
+//--------------------------------------------------
+smaShort = ta.sma(close, shortLen)
+smaLong  = ta.sma(close, longLen)
+
+plot(showSMA ? smaShort : na, color=color.white, title="SMA Short")
+plot(showSMA ? smaLong  : na, color=color.red, title="SMA Long")
+
+//--------------------------------------------------
+// Function : state & bars since cross (single TF)
+//--------------------------------------------------
+f_state(tf) =>
+    s = request.security(syminfo.tickerid, tf, ta.sma(close, shortLen), lookahead=barmerge.lookahead_on)
+    l = request.security(syminfo.tickerid, tf, ta.sma(close, longLen), lookahead=barmerge.lookahead_on)
+
+    dir = s > l ? 1 : s < l ? -1 : 0
+
+    // 修正: lookahead_on で短TFのクロスを独立計算
+    gcBars = request.security(syminfo.tickerid, tf, ta.barssince(ta.crossover(s, l)), lookahead=barmerge.lookahead_on)
+    dcBars = request.security(syminfo.tickerid, tf, ta.barssince(ta.crossunder(s, l)), lookahead=barmerge.lookahead_on)
+
+    bars = dir == 1 ? gcBars : dir == -1 ? dcBars : na
+    [dir, bars]
+
+//--------------------------------------------------
+// Fixed timeframe calls
+//--------------------------------------------------
+[d1, b1]     = f_state("1")
+[d5, b5]     = f_state("5")
+[d15, b15]   = f_state("15")
+[d30, b30]   = f_state("30")
+[d60, b60]   = f_state("60")
+[d240, b240] = f_state("240")
+[dD, bD]     = f_state("D")
+[dW, bW]     = f_state("W")
+
+//--------------------------------------------------
+// Table
+//--------------------------------------------------
+var table tb = table.new(dashPos, 8, 3, frame_width=1)
+
+if barstate.islast
+    table.cell(tb, 0, 0, "M1", text_color=color.white)
+    table.cell(tb, 1, 0, "M5", text_color=color.white)
+    table.cell(tb, 2, 0, "M15", text_color=color.white)
+    table.cell(tb, 3, 0, "M30", text_color=color.white)
+    table.cell(tb, 4, 0, "H1", text_color=color.white)
+    table.cell(tb, 5, 0, "H4", text_color=color.white)
+    table.cell(tb, 6, 0, "D1", text_color=color.white)
+    table.cell(tb, 7, 0, "W1", text_color=color.white)
+
+    dirs = array.from(d1, d5, d15, d30, d60, d240, dD, dW)
+    bars = array.from(b1, b5, b15, b30, b60, b240, bD, bW)
+
+    for i = 0 to 7
+        dir = array.get(dirs, i)
+        bar = array.get(bars, i)
+
+        txtDir = dir == 1 ? "↑" : dir == -1 ? "↓" : "N"
+        colDir = dir == 1 ? color.green : dir == -1 ? color.red : color.gray
+
+        barColor = na(bar) ? color.gray :
+                   bar <= 2 ? color.lime :
+                   bar <= 5 ? color.white :
+                   bar <= 10 ? color.silver :
+                   bar <= 20 ? color.gray :
+                   color.new(color.gray, 40)
+
+        table.cell(tb, i, 1, txtDir, text_color=colDir)
+        table.cell(tb, i, 2, na(bar) ? "-" : str.tostring(bar), text_color=barColor)
