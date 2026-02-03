@@ -1,0 +1,64 @@
+// This Pine Script® code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © katanai_makenai_fx
+
+//@version=5
+indicator("POC: USDJPY MTF 200SMA Sort (fixed)", overlay=false)
+
+// --- 対象シンボルを input に ---
+sym = input.symbol("USDJPY", "Symbol (USDJPY)")
+
+// --- 各TFの200SMA（gaps/lookahead を明示）---
+sma_d1  = request.security(sym, "D",   ta.sma(close, 200), barmerge.gaps_off, barmerge.lookahead_off)
+sma_h4  = request.security(sym, "240", ta.sma(close, 200), barmerge.gaps_off, barmerge.lookahead_off)
+sma_h1  = request.security(sym, "60",  ta.sma(close, 200), barmerge.gaps_off, barmerge.lookahead_off)
+sma_m30 = request.security(sym, "30",  ta.sma(close, 200), barmerge.gaps_off, barmerge.lookahead_off)
+sma_m15 = request.security(sym, "15",  ta.sma(close, 200), barmerge.gaps_off, barmerge.lookahead_off)
+
+// --- PRICE も明示的に取得（USDJPY の現在足の close）---
+price_usdjpy = request.security(sym, timeframe.period, close, barmerge.gaps_off, barmerge.lookahead_off)
+
+// --- 配列（元データ）---
+float[] values  = array.from(sma_d1, sma_h4, price_usdjpy, sma_h1, sma_m30, sma_m15)
+string[] labels = array.from("D1", "H4", "PRICE", "H1", "M30", "M15")
+
+// --- na を除外した一時配列を作ってソート（要素数が少ないためバブルでOK） ---
+float[] vals = array.new_float()
+string[] labs = array.new_string()
+
+for i = 0 to array.size(values) - 1
+    v = array.get(values, i)
+    if not na(v)
+        array.push(vals, v)
+        array.push(labs, array.get(labels, i))
+
+// ソート（高 → 低）
+for i = 0 to array.size(vals) - 2
+    for j = i + 1 to array.size(vals) - 1
+        if array.get(vals, i) < array.get(vals, j)
+            // swap vals
+            tmpVal = array.get(vals, i)
+            array.set(vals, i, array.get(vals, j))
+            array.set(vals, j, tmpVal)
+            // swap labels
+            tmpLab = array.get(labs, i)
+            array.set(labs, i, array.get(labs, j))
+            array.set(labs, j, tmpLab)
+
+// --- テーブル ---
+// 2 列（ラベル, 値）、8 行で作成（必要なら変数を変更）
+cols = 2
+rows = 8
+var table t = table.new(position.top_left, cols, rows, border_width=1)
+
+if barstate.islast
+    // テーブル全体を消す（範囲を指定）
+    table.clear(t, 0, 0, cols - 1, rows - 1)
+
+    table.cell(t, 0, 0, str.tostring(sym) + " (200SMA)", text_color=color.white, bgcolor=color.gray)
+    table.cell(t, 1, 0, "Value", text_color=color.white, bgcolor=color.gray)
+
+    for i = 0 to array.size(labs) - 1
+        lbl = array.get(labs, i)
+        val = array.get(vals, i)
+        table.cell(t, 0, i + 1, lbl, text_color=color.white)
+        table.cell(t, 1, i + 1, str.tostring(val, "#.000"), text_color=color.white)
